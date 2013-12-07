@@ -1,0 +1,248 @@
+#!/usr/bin/python 
+
+import sys
+sys.path.append('/opt/contrail/lib/python')
+
+import instance_service
+import getopt
+import logging
+import socket
+import subprocess
+import re
+
+from contrail_lib import rpc_client_instance, uuid_from_string
+
+# global state
+glb_interfaces = {}
+
+# add-br <bridge>
+def add_bridge(args):
+    cmd= ['vif','--create']
+    cmd.extend(args)
+    subprocess.call(cmd)
+    pass
+
+# del-br <bridge>
+def del_bridge(args):
+    pass
+
+# list-br
+def list_bridge(args):
+    print 'xenbr0'
+
+# br-set-external-id
+def br_set_external_id(args):
+	pass
+
+# list-ports
+def list_ports(args):
+	pass
+
+# add-port <network> <port>
+def add_port(args):
+    args = filter(lambda x: not x.startswith('option:'), args)
+    if len(args) < 2:
+        return
+    if args[1].startswith('eth'):
+        return
+    if args[1].startswith('xenbr'):
+        return
+    glb_interfaces[args[1]] = { 'network': args[0] }
+
+def command_set(args):
+    if len(args) and args[0] == 'interface':
+        if len(args) < 2:
+            logging.error('expected: set interface <interface> <value>')
+            sys.exit(1)
+        rec = glb_interfaces.get(args[1])
+        if not rec:
+            rec = {}
+            glb_interfaces[args[1]] = rec
+
+        for opt in args[2:]:
+            m = re.match(r'external-ids\:"?([a-z0-9-:]*)"?\="?([a-z0-9-:]*)"?', opt)
+            if m:
+                logging.debug(m.group(1) + '=' + m.group(2))
+                rec[m.group(1)] = m.group(2)
+            else:
+                logging.debug('Ignored option: ' + opt)
+# end command_set
+
+def command_get(args):
+    if len(args) and args[0] == 'interface':
+        if len(args) < 3:
+            logging.error('expected: get interface <interface> <value>')
+            sys.exit(1)
+        if args[2] == 'ofport':
+            print args[1]
+
+# end command_get
+
+def parse_vif_config(output):
+    logging.debug(output)
+    config = {}
+
+    for line in output:
+        if not line:
+            continue
+        items = line.split(';')
+        for item in items:
+            (key, value) = item.split(':')
+            config[key.strip()] = value.strip()
+
+    return config
+
+def execute_add(interface_name, params):
+    """ Send the add command to the vns agent """
+    mandatory = ['xs-vif-uuid', 'xs-vm-uuid']
+    for opt in mandatory:
+        if not opt in params:
+            logging.error('Missing mandatory parameter ' + opt )
+            print 'Missing mandatory parameter ' + opt
+            sys.exit(1)
+
+    # retrive global vif-uuid and vm-uuid
+    cmd = ['xe', 'vif-param-get', 'uuid=' + params.get('xs-vif-uuid'),
+           'param-name=other-config']
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.wait():
+        print 'xe vif-param-get failed: ' + repr(proc.stderr.readlines())
+        sys.exit(1)
+
+    config = parse_vif_config(proc.stdout.readlines())
+    required = ['nicira-iface-id', 'nicira-vm-id']
+    for req in required:
+        if not req in config:
+            logging.error('Missing field ' + req + ' in vif other-config param')
+            print 'Missing field ' + req + ' in vif other-config param'
+            sys.exit(1)
+
+    ip_addr = '0.0.0.0'
+
+    import instance_service.ttypes
+    data = instance_service.ttypes.Port(
+        uuid_from_string(config.get('nicira-iface-id')),
+        uuid_from_string(config.get('nicira-vm-id')),
+        interface_name,
+        ip_addr,
+        [0] * 16,
+        params.get('attached-mac'))
+
+    logging.debug(data)
+    rpc = rpc_client_instance()
+    if not rpc:
+        return
+    try:
+        rpc.AddPort([data])
+    except socket.error:
+        logging.error('RPC failure')
+#end execute_add
+
+def read_vif_info(domid, devid):
+    cmd = ['xenstore-ls', '/xapi/' + domid + '/private/vif/'  + devid]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    (output, err) = proc.communicate()
+    items = output.split('\n')
+    prop_map = {}
+    for line in items:
+        m = re.match(r'([\w-]+) = \"([\w-]+)\"', line)
+        if m:
+            prop_map[m.group(1)] = m.group(2)
+    return prop_map
+#end read_vif_info
+
+# del-port <port>
+def del_port(args):
+    if len(args) == 0:
+        sys.exit(1)
+
+    m = re.match(r'vif(\d+)\.(\d+)', args[0])
+    if not m:
+        sys.exit(1)
+
+    domid = m.group(1)
+    devid = m.group(2)
+    
+    prop_map = read_vif_info(domid, devid)
+
+    cmd = ['xe', 'vif-param-get', 'uuid=' + prop_map['vif-uuid'],
+           'param-name=other-config']
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    (output, err) = proc.communicate()
+    config = parse_vif_config(output.split('\n'))
+
+    rpc = rpc_client_instance()
+    if not rpc:
+        return
+    try:
+        rpc.DeletePort(uuid_from_string(config.get('nicira-iface-id')))
+    except socket.error:
+        logging.error('RPC failure')
+
+    logging.info('Deleted '  + args[0] + ' uuid = ' + config.get('nicira-iface-id'))
+
+# end del_port
+
+def parse_command(cmd):
+    try:
+        opts, args = getopt.getopt(cmd, '', ['if-exists', 'may-exist'])
+    except getopt.GetoptError, (errno, strerror):
+        logging.error('cmd getopt: ' + strerror)
+        sys.exit(1)
+
+    if args[0] == 'add-port':
+        add_port(args[1:])
+    elif args[0] == 'del-port':
+        del_port(args[1:])
+    elif args[0] == 'add-br':
+        add_bridge(args[1:])
+    elif args[0] == 'del-br':
+        del_bridge(args[1:])
+    elif args[0] == 'list-br':
+        list_bridge(args[1:])
+    elif args[0] == 'list-ports':
+        list_ports(args[1:])
+    elif args[0] == 'iface-to-br':
+        print 'xenbr0'
+    elif args[0] == 'set':
+        command_set(args[1:])
+    elif args[0] == 'get':
+        command_get(args[1:])
+    elif args[0] == 'br-set-external-id':
+        br_set_external_id(args[1:])
+    else:
+        logging.error('Unknown command: ' + args[0])
+
+def execute_commands():
+    for int in glb_interfaces:
+        param = glb_interfaces[int]
+        if param.get('network'):
+            execute_add(int, param)
+
+def main(argv):
+    try:
+        opts, args = getopt.getopt(argv, '', ['if-exists', 'timeout='])
+    except getopt.GetoptError, (errno, strerror):
+        logging.error('getopt: ' + strerror)
+        sys.exit(1)
+    for opt,arg in opts:
+        print "option: ", opt, arg
+
+    cmd = []
+    for arg in args:
+        if arg == '--':
+            parse_command(cmd)
+            cmd = []
+        else:
+            cmd.append(arg)
+
+    if len(cmd):
+        parse_command(cmd)
+
+    execute_commands()
+
+if __name__ == '__main__':
+    logging.basicConfig(filename='/var/log/contrail-vsctl.log',
+                        level=logging.DEBUG)
+    logging.debug('Command: ' + ' '.join(sys.argv))
+    main(sys.argv[1:])

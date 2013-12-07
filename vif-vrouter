@@ -1,0 +1,216 @@
+#!/bin/sh
+
+# Copyright (C) 2008,2009 Citrix Systems, Inc.
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License as published
+# by the Free Software Foundation; version 2.1 only. with the special
+# exception on linking described in file LICENSE.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+
+IP="/sbin/ip"
+VRCTL="/opt/contrail/bin/vrouter-ctl"
+
+handle_ethtool()
+{
+    local opt=$1
+    # other-config keys are optional
+    local arg=$(xenstore-read "${PRIVATE}/other-config/ethtool-${opt}" 2>/dev/null)
+    if [ $? -eq 0 -a -n "${arg}" ] ; then
+        case "${arg}" in
+            true|on)   /sbin/ethtool -K "${dev}" "${opt}" on ;;
+            false|off) /sbin/ethtool -K "${dev}" "${opt}" off ;;
+            *) logger -t scripts-vif "Unknown ethtool argument ${opt}=${arg} on ${dev}/${VIFUUID}" ;;
+        esac
+    fi
+}
+
+handle_mtu()
+{
+    local mtu=$(xenstore-read "${PRIVATE}/MTU" 2>/dev/null)
+    if [ $? -eq 0 -a -n "${mtu}" ]; then
+        logger -t scripts-vif "Setting ${dev} MTU ${mtu}"
+        ${IP} link set "${dev}" mtu ${mtu} || logger -t scripts-vif "Failed to ip link set ${dev} mtu ${mtu}. Error code $?"
+    else
+        logger -t scripts-vif "Failed to read ${PRIVATE}/MTU"
+        xenstore-write "${HOTPLUG_ERROR}" "Failed to read ${PRIVATE}/MTU"
+        exit 1
+    fi
+}
+
+#
+# Return true if this is an hardware vitualized VM.
+#
+isHVM()
+{
+    local vmpath=$(xenstore-read /local/domain/${DOMID}/vm 2>/dev/null)
+    local vmid=$(basename ${vmpath})
+    if [ -z "${vmid}" ]; then
+	return 0
+    fi
+    local pvboot=$(xe vm-param-get uuid=${vmid} param-name=PV-bootloader 2>/dev/null)
+    if [ -z "${pvboot}" ]; then
+	return 1
+    fi
+    return 0
+}
+
+add_vm_interface()
+{
+    local dev=$1
+    local address=$(xenstore-read "${PRIVATE}/bridge-MAC")
+    if [ $? -ne 0 -o -z "${address}" ]; then
+        logger -t scripts-vif "Failed to read ${PRIVATE}/bridge-MAC from xenstore"
+        xenstore-write "${HOTPLUG_ERROR}" "Failed to read ${PRIVATE}/bridge-MAC from xenstore"
+        exit 1
+    fi
+
+    logger -t scripts-vif "Adding ${dev} with address ${address}"
+
+    local vif_uuid=$(xenstore-read ${PRIVATE}/vif-uuid 2>/dev/null)
+    if [ -z "${vif_uuid}" ]; then
+	logger -t scripts-vif "Failed to read vif-uuid"
+	exit 1
+    fi
+
+    local config=$(xe vif-param-get uuid=${vif_uuid} param-name=other-config 2>/dev/null)
+    if [ -z "${config}" ]; then
+	logger -t scripts-vif "Unable to read vif config parameters"
+	exit 1
+    fi
+
+    local vmi=$(echo ${config} | tr ';' '\n' | awk '/iface-id:/ {print $2;}' 2>/dev/null)
+    if [ -z "${vmi}" ]; then
+	logger -t scripts-vif "Unable to find virtual-machine-interface uuid"
+	exit 1
+    fi
+
+    local vm=$(echo ${config} | tr ';' '\n' | awk '/vm-id:/ {print $2;}' 2>/dev/null)
+    if [ -z "${vm}" ]; then
+	logger -t scripts-vif "Unable to find virtual-machine uuid"
+	exit 1
+    fi
+
+    local guestmac=$(xenstore-read "/local/domain/$DOMID/device/vif/$DEVID/mac" 2>/dev/null)
+
+    $VRCTL --vmi=$vmi --vm=$vm --mac-address=${guestmac} add $dev
+    if [ $? == 0 ]; then
+	logger -t scripts-vif "add ${dev} succeeded"
+    else
+	logger -t scripts-vif "add ${dev} failure"
+    fi
+
+}
+
+del_vm_interface()
+{
+    local vif_uuid=$(xenstore-read ${PRIVATE}/vif-uuid 2>/dev/null)
+    if [ -z "${vif_uuid}" ]; then
+	logger -t scripts-vif "Failed to read vif-uuid"
+	exit 1
+    fi
+
+    local config=$(xe vif-param-get uuid=${vif_uuid} param-name=other-config 2>/dev/null)
+    if [ -z "${config}" ]; then
+	logger -t scripts-vif "Unable to read vif config parameters"
+	exit 1
+    fi
+
+    local vmi=$(echo ${config} | tr ';' '\n' | awk '/iface-id:/ {print $2;}' 2>/dev/null)
+    if [ -z "${vmi}" ]; then
+	logger -t scripts-vif "Unable to find virtual-machine-interface uuid"
+	exit 1
+    fi
+
+    $VRCTL --vmi=$vmi del
+}
+
+
+TYPE=$2
+
+case ${TYPE} in
+    vif)
+        if [ -z ${XENBUS_PATH} ]; then
+            DOMID=$3
+            DEVID=$4
+            XENBUS_PATH=/local/domain/$DOMID/device/vif/$DEVID
+        else
+            DOMID=`echo ${XENBUS_PATH} | cut -f 3 -d '/'`
+            DEVID=`echo ${XENBUS_PATH} | cut -f 4 -d '/'`
+        fi
+        dev=vif${DOMID}.${DEVID}
+        ;;
+    tap)
+        dev=$INTERFACE
+        DOMID=`echo ${dev#tap} | cut -f 1 -d '.'`
+        DEVID=`echo ${dev#tap} | cut -f 2 -d '.'`
+        ;;
+    *)  
+        logger -t scripts-vif "unknown interface type ${TYPE}"
+        exit 1
+        ;;
+esac
+
+ACTION=$1
+XAPI=/xapi/${DOMID}/hotplug/vif/${DEVID}
+HOTPLUG=/xapi/${DOMID}/hotplug/vif/${DEVID}
+PRIVATE=/xapi/${DOMID}/private/vif/${DEVID}
+HOTPLUG_STATUS="${XENBUS_PATH}/hotplug-status"
+HOTPLUG_ERROR="${XENBUS_PATH}/hotplug-error"
+
+logger -t scripts-vif "Called as \"$@\" domid:$DOMID devid:$DEVID mode:$NETWORK_MODE"
+
+case "${ACTION}" in
+online)
+    xenstore-write "${HOTPLUG}/vif" "${dev}"
+    xenstore-write "${HOTPLUG}/hotplug" "online"
+
+    logger -t scripts-vif "${dev}: writing ${HOTPLUG_STATUS}=connected"
+    xenstore-write "${HOTPLUG_STATUS}" "connected"
+    ;;
+
+add)
+    # Try to determine whether this is an HVM or PV machine.
+    # HVMs use qemu tap interfaces to send and receive packets.
+    isHVM
+    if [ $? -gt 0 -a "${TYPE}" == "vif" ]; then
+	logger -t scripts-vif "HVM ${dev} unused"
+    else
+	add_vm_interface ${dev}
+    fi
+
+    ${IP} link set ${dev} up
+    ;;
+
+remove)
+    ${IP} link set ${dev} down
+
+    if [ "${TYPE}" == "tap" ]; then
+	del_vm_interface
+    fi
+    ;;
+
+offline)
+    # vif must be deleted before removing hotplug.
+    # xapi will deleted the vif from the xenstore and we will not have
+    # a way to retrieve the uuid
+    isHVM
+    if [ $? -eq 0 -a "${TYPE}" == "vif" ]; then
+	del_vm_interface
+    fi
+
+    logger -t script-vif "${dev}: removing ${HOTPLUG_STATUS}"
+    xenstore-rm "${HOTPLUG_STATUS}"
+    logger -t script-vif "${dev}: removing ${HOTPLUG}/hotplug"
+    xenstore-rm "${HOTPLUG}/hotplug"
+    logger -t scripts-vif "${dev} has been removed"
+    ;;
+
+*)
+    logger -t scripts-vif "${dev}: ignored action ${ACTION}"
+    ;;
+esac
