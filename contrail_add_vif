@@ -1,0 +1,57 @@
+#!/usr/bin/python
+
+import os, sys, subprocess
+sys.path.append('/opt/contrail/lib/python')
+
+if os.path.exists("/opt/xensource/sm"):
+    sys.path.extend(["/opt/xensource/sm/", "/usr/local/sbin/", "/sbin/"])
+if os.path.exists("/usr/lib/xcp/sm"):
+    sys.path.extend(["/usr/lib/xcp/sm/", "/usr/local/sbin/", "/sbin/"])
+
+def run_cmd(cmd):
+	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True)
+	(output, err) = proc.communicate()
+	return output
+
+def add_vifs():
+	#get active vif list
+	cmd = 'ifconfig | grep vif | cut -f 1 -d\' \''
+	vifs = run_cmd(cmd).split('\n')
+	for vif in vifs:
+		if vif == '':
+			continue
+		#get vif uuid
+		vif_domdevid = vif.lstrip('vif')
+		domdevid = vif_domdevid.split('.')
+		args = '/xapi/' + domdevid[0].strip() + '/private/vif/' \
+			+ domdevid[1].strip() + '/vif-uuid'
+		cmd = ['xenstore-read', args]
+		proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+		(vif_uuid, err) = proc.communicate()
+		vif_uuid = vif_uuid.strip('\n')
+
+		#get vif MAC
+		cmd = ['xe vif-param-get uuid=' + vif_uuid + ' param-name=MAC']
+		vif_mac = run_cmd(cmd).strip('\n')
+
+		#get vmi and vm uuid (control node) 
+		cmd = ['xe vif-param-get uuid=' + vif_uuid + ' param-name=other-config']
+		props = run_cmd(cmd).split(';')
+		data = {}
+		for prop in props:
+			keyvalue = prop.split(':')
+			data[keyvalue[0].strip()] = keyvalue[1].strip()
+
+		#post the vif add command
+		args = '--vmi=' + data['cloudstack-nic-id'] + \
+			 ' --vm='+ data['cloudstack-vm-id'] + \
+			 ' --mac-address=' + vif_mac + ' add '+ vif
+		cmd = ['/opt/contrail/bin/vrouter-ctl '+ args]
+		ret = run_cmd(cmd)
+
+def main(argv):
+	add_vifs()
+
+if __name__ == '__main__':
+    main(sys.argv)
+
