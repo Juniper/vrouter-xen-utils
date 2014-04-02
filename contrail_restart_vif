@@ -1,0 +1,16 @@
+#!/bin/sh
+
+SERVER=127.0.0.1 PORT=9090
+timeout=0
+data=`netstat -an | grep 9090`
+while [ -z "$data" -a  "$timeout" -le 20 ]
+do
+    timeout=$((timeout+1))
+    sleep 1
+    data=`netstat -an | grep 9090`
+done
+if [[ -n "$data" ]]; then
+    /opt/contrail/bin/contrail_add_vif
+else
+    echo "Agent port 9090 is not up, bailing out!"
+fi
