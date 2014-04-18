@@ -83,7 +83,7 @@ add_vm_interface()
 	exit 1
     fi
 
-    local vmi=$(echo ${config} | tr ';' '\n' | awk '/nicira-iface-id:/ {print $2;}' 2>/dev/null)
+    local vmi=$(echo ${config} | tr ';' '\n' | awk '/cloudstack-iface-id:/ {print $2;}' 2>/dev/null)
     if [ -z "${vmi}" ]; then
 	logger -t scripts-vif "Unable to find virtual-machine-interface uuid"
 	exit 1
@@ -91,11 +91,8 @@ add_vm_interface()
 
     local vm=$(echo ${config} | tr ';' '\n' | awk '/cloudstack-vm-id:/ {print $2;}' 2>/dev/null)
     if [ -z "${vm}" ]; then
-	vm=$(echo ${config} | tr ';' '\n' | awk '/nicira-vm-id:/ {print $2;}' 2>/dev/null)
-	if [ -z  "${vm}" ]; then
-	    logger -t scripts-vif "Unable to find virtual-machine uuid"
-	    exit 1
-	fi
+	 logger -t scripts-vif "Unable to find virtual-machine uuid"
+	 exit 1
     fi
 
     local guestmac=$(xenstore-read "/local/domain/$DOMID/device/vif/$DEVID/mac" 2>/dev/null)
