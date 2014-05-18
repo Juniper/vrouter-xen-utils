@@ -7,11 +7,24 @@ import instance_service
 import getopt
 import logging
 import socket
+import os
+import subprocess
 
 from contrail_lib import rpc_client_instance, uuid_from_string
 
+def run_cmd(cmd):
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True)
+        (output, err) = proc.communicate()
+        return output
+
 def add_interface(interface_name, vmi, vm, mac):
     import instance_service.ttypes
+    #validate interface name
+    cmd = 'vif --list | grep ' + interface_name + ' | cut -f 2 -d \':\''
+    vif_name = run_cmd(cmd).strip()
+    if vif_name == interface_name:
+	logging.error(vif_name + ' exist, bailing out!')
+	return
     data = instance_service.ttypes.Port(
         uuid_from_string(vmi),
         uuid_from_string(vm),
@@ -31,6 +44,11 @@ def add_interface(interface_name, vmi, vm, mac):
 
 
 def del_interface(vmi):
+    cmd = 'vif --list | grep ' + interface_name + ' | cut -f 2 -d \':\''
+    vif_name = run_cmd(cmd).strip()
+    if vif_name != interface_name:
+	logging.error(vif_name + ' does not exist, bailing out!')
+	return
     rpc = rpc_client_instance()
     if not rpc:
         return

@@ -110,7 +110,7 @@ def execute_add(interface_name, params):
         sys.exit(1)
 
     config = parse_vif_config(proc.stdout.readlines())
-    required = ['nicira-iface-id', 'nicira-vm-id']
+    required = ['cloudstack-nic-id', 'cloudstack-vm-id']
     for req in required:
         if not req in config:
             logging.error('Missing field ' + req + ' in vif other-config param')
@@ -121,8 +121,8 @@ def execute_add(interface_name, params):
 
     import instance_service.ttypes
     data = instance_service.ttypes.Port(
-        uuid_from_string(config.get('nicira-iface-id')),
-        uuid_from_string(config.get('nicira-vm-id')),
+        uuid_from_string(config.get('cloudstack-nic-id')),
+        uuid_from_string(config.get('cloudstack-vm-id')),
         interface_name,
         ip_addr,
         [0] * 16,
@@ -175,11 +175,11 @@ def del_port(args):
     if not rpc:
         return
     try:
-        rpc.DeletePort(uuid_from_string(config.get('nicira-iface-id')))
+        rpc.DeletePort(uuid_from_string(config.get('cloudstack-nic-id')))
     except socket.error:
         logging.error('RPC failure')
 
-    logging.info('Deleted '  + args[0] + ' uuid = ' + config.get('nicira-iface-id'))
+    logging.info('Deleted '  + args[0] + ' uuid = ' + config.get('cloudstack-nic-id'))
 
 # end del_port
 
